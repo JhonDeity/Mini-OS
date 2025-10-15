@@ -48,10 +48,17 @@ int main() {
         if (args[0] == NULL) {
             continue;
         }
+
+        // Detectar ejecución en segundo plano
+        int background = 0;
+        if (i > 0 && strcmp(args[i - 1], "&") == 0) {
+            background = 1;
+            args[i - 1] = NULL; // eliminar '&' de los argumentos
+        }
         //Detecta redirecciones y pipes
         int redir_out = 0, redir_append = 0, redir_in = 0, has_pipe = 0;
         char *file_out = NULL, *file_in = NULL;
-        char *args1[MAX_ARGS], *args2[MAX_ARGS]; // para pipe
+        char *args1[MAX_ARGS], *args2[MAX_ARGS];
 
         // verifica si hay tuberias (|)
         int j = 0, k = 0;
@@ -155,7 +162,11 @@ int main() {
         } 
         else {
             // Proceso padre: esperar al hijo
-            waitpid(pid, &status, 0);
+            if (background) {
+                printf("[PID %d] ejecutándose en segundo plano...\n", pid);
+            } else {
+                waitpid(pid, &status, 0);
+            }
         }
     }
 
