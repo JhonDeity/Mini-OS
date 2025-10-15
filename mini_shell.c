@@ -7,14 +7,25 @@
 #include <fcntl.h>
 #include <errno.h> 
 #include <signal.h> 
+#include <pthread.h>  
 
 #define MAX_INPUT 100
 #define MAX_ARGS 10
+#define CMD_STR_LEN 256 
 
 void wait_for_background_jobs();
-void ignore_signal(int signo) {
-}
+void ignore_signal(int signo);
+void *monitor_background(void *arg);   
+pthread_mutex_t print_mutex = PTHREAD_MUTEX_INITIALIZER;
 
+typedef struct {
+    pid_t pid;
+    char cmd[CMD_STR_LEN];
+} bg_job_t;
+
+void ignore_signal(int signo) {
+    (void)signo;
+}
 
 int main() {
     char input[MAX_INPUT];
@@ -38,6 +49,7 @@ int main() {
             break;
         }
 
+        input[strcspn(input, "\n")] = '\0';
         int i = 0;
         
         args[i] = strtok(input, " \t\n"); 
@@ -71,7 +83,7 @@ int main() {
             continue; 
         }
 
-        // Detectar ejecución en segundo plano
+        // Detectar ejecucion en segundo plano
         int background = 0;
         int last_arg_index = i - 1;
         if (last_arg_index >= 0 && args[last_arg_index] != NULL && strcmp(args[last_arg_index], "&") == 0) {
@@ -149,7 +161,10 @@ int main() {
             if (has_pipe) {
 
                 int fd[2];
-                if (pipe(fd) == -1) { perror("pipe"); exit(1); }
+                if (pipe(fd) == -1) { 
+                    perror("pipe"); 
+                    exit(1); 
+                }
                 
                 pid_t pid2 = fork();
                 if (pid2 == 0) {
@@ -201,9 +216,36 @@ int main() {
         } 
         else {
             if (background) {
-                printf("[PID %d] ejecutándose en segundo plano...\n", pid);
+                char cmdbuf[CMD_STR_LEN] = {0};
+                int idx = 0;
+                for (int t = 0; args[t] != NULL && idx + 1 < CMD_STR_LEN; t++) {
+                    int n = snprintf(cmdbuf + idx, CMD_STR_LEN - idx, "%s ", args[t]);
+                    if (n < 0) break;
+                    idx += n;
+                }
+
+                bg_job_t *job = malloc(sizeof(bg_job_t));
+                if (!job) {
+                    fprintf(stderr, "Error al asignar memoria para job\n");
+                } else {
+                    job->pid = pid;
+                    strncpy(job->cmd, cmdbuf, CMD_STR_LEN - 1);
+                    job->cmd[CMD_STR_LEN - 1] = '\0';
+
+                    pthread_t tid;
+
+                    if (pthread_create(&tid, NULL, monitor_background, job) != 0) {
+                        perror("Error al crear hilo monitor");
+                        free(job);
+                    } else {
+                        pthread_detach(tid);
+                        pthread_mutex_lock(&print_mutex);
+                        printf("[PID %d] ejecutándose en segundo plano...\n", pid);
+                        pthread_mutex_unlock(&print_mutex);
+                    }
+                }
             } else {
-                waitpid(pid, &status, 0); 
+                waitpid(pid, &status, 0);
             }
         }
     }
@@ -215,6 +257,32 @@ void wait_for_background_jobs() {
     pid_t pid;
     int status;
     while ((pid = waitpid(-1, &status, WNOHANG)) > 0) {
+        pthread_mutex_lock(&print_mutex); 
         fprintf(stderr, "\n[PID %d] Tarea en segundo plano terminada.\n", pid);
+        pthread_mutex_unlock(&print_mutex);
     }
+}
+
+
+void *monitor_background(void *arg) {
+    if (!arg) return NULL;
+    bg_job_t *job = (bg_job_t *)arg;
+    pid_t pid = job->pid;
+    int status;
+
+    pid_t r = waitpid(pid, &status, 0);
+    pthread_mutex_lock(&print_mutex);
+    if (r == -1) {
+        fprintf(stderr, "\n[PID %d] finalizó (error: %s).\n", pid, strerror(errno));
+    } else if (WIFEXITED(status)) {
+        fprintf(stderr, "\n[PID %d] Tarea terminada. Salida: %d. Comando: %s\n",
+                pid, WEXITSTATUS(status), job->cmd);
+    } else if (WIFSIGNALED(status)) {
+        fprintf(stderr, "\n[PID %d] Terminó por señal %d. Comando: %s\n",
+                pid, WTERMSIG(status), job->cmd);
+    }
+    pthread_mutex_unlock(&print_mutex);
+
+    free(job);   
+    return NULL;
 }
